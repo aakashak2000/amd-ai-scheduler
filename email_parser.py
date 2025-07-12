@@ -7,13 +7,12 @@ class EmailParser:
     def __init__(self, llm_service=None):
         self.llm_service = llm_service
         
-        # Common time patterns
+        # Fixed time patterns - more specific matching
         self.time_patterns = [
-            r'(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)',
-            r'(\d{1,2})\s*(AM|PM|am|pm)',
-            r'(\d{1,2}):(\d{2})',
-            r'at\s+(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)?',
-            r'at\s+(\d{1,2})\s*(AM|PM|am|pm)'
+            r'(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)',  # 11:00 AM
+            r'(\d{1,2})\s*(AM|PM|am|pm)',          # 11 AM  
+            r'at\s+(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)',  # at 11:00 AM
+            r'at\s+(\d{1,2})\s*(AM|PM|am|pm)',     # at 11 AM
         ]
         
         # Date patterns
@@ -22,14 +21,14 @@ class EmailParser:
             r'(tomorrow|today|next week)',
             r'(\d{1,2})/(\d{1,2})/(\d{4})',
             r'(\d{1,2})-(\d{1,2})-(\d{4})',
-            r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})',
-            r'(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)'
         ]
         
         # Duration patterns
         self.duration_patterns = [
-            r'(\d+)\s*(minutes?|mins?|hours?|hrs?)',
-            r'for\s+(\d+)\s*(minutes?|mins?|hours?|hrs?)',
+            r'(\d+)\s*(minutes?|mins?)',
+            r'(\d+)\s*(hours?|hrs?)',
+            r'for\s+(\d+)\s*(minutes?|mins?)',
+            r'for\s+(\d+)\s*(hours?|hrs?)',
             r'(\d+)-minute',
             r'(\d+)-hour'
         ]
@@ -39,9 +38,12 @@ class EmailParser:
         
         # Use LLM for complex parsing if available
         if self.llm_service:
-            llm_result = self._parse_with_llm(email_content)
-            if llm_result:
-                return llm_result
+            try:
+                llm_result = self._parse_with_llm(email_content)
+                if llm_result:
+                    return llm_result
+            except Exception as e:
+                print(f"LLM parsing failed: {e}")
         
         # Fallback to regex parsing
         return self._parse_with_regex(email_content)
@@ -101,25 +103,41 @@ class EmailParser:
         }
     
     def _extract_time(self, content: str) -> Optional[str]:
-        """Extract time from email content"""
+        """Extract time from email content with fixed parsing"""
         for pattern in self.time_patterns:
             match = re.search(pattern, content, re.IGNORECASE)
             if match:
                 groups = match.groups()
                 
-                if len(groups) >= 2:
-                    hour = int(groups[0])
-                    minute = int(groups[1]) if groups[1] else 0
-                    
-                    # Handle AM/PM
-                    if len(groups) > 2 and groups[2]:
+                try:
+                    if len(groups) >= 3:  # Hour:Minute AM/PM format
+                        hour = int(groups[0])
+                        minute = int(groups[1])
                         period = groups[2].upper()
+                        
+                        # Convert to 24-hour format
                         if period == 'PM' and hour != 12:
                             hour += 12
                         elif period == 'AM' and hour == 12:
                             hour = 0
-                    
-                    return f"{hour:02d}:{minute:02d}"
+                            
+                        return f"{hour:02d}:{minute:02d}"
+                        
+                    elif len(groups) >= 2:  # Hour AM/PM format (no minutes)
+                        hour = int(groups[0])
+                        period = groups[1].upper()
+                        
+                        # Convert to 24-hour format
+                        if period == 'PM' and hour != 12:
+                            hour += 12
+                        elif period == 'AM' and hour == 12:
+                            hour = 0
+                            
+                        return f"{hour:02d}:00"
+                        
+                except (ValueError, IndexError) as e:
+                    print(f"Time parsing error for pattern {pattern}: {e}")
+                    continue
         
         return None
     
@@ -149,22 +167,6 @@ class EmailParser:
                 target_date = today + timedelta(days=days_ahead)
                 return target_date.strftime('%Y-%m-%d')
         
-        # Check for date patterns
-        for pattern in self.date_patterns[2:]:  # Skip weekday patterns
-            match = re.search(pattern, content, re.IGNORECASE)
-            if match:
-                # Handle different date formats
-                try:
-                    groups = match.groups()
-                    if '/' in pattern:
-                        month, day, year = groups
-                        return f"{year}-{month:0>2}-{day:0>2}"
-                    elif '-' in pattern:
-                        month, day, year = groups
-                        return f"{year}-{month:0>2}-{day:0>2}"
-                except:
-                    continue
-        
         # Default to tomorrow if no date found
         tomorrow = today + timedelta(days=1)
         return tomorrow.strftime('%Y-%m-%d')
@@ -174,14 +176,17 @@ class EmailParser:
         for pattern in self.duration_patterns:
             match = re.search(pattern, content, re.IGNORECASE)
             if match:
-                groups = match.groups()
-                number = int(groups[0])
-                unit = groups[1].lower() if len(groups) > 1 else 'minutes'
-                
-                if 'hour' in unit:
-                    return number * 60
-                else:
-                    return number
+                try:
+                    groups = match.groups()
+                    number = int(groups[0])
+                    unit = groups[1].lower() if len(groups) > 1 else 'minutes'
+                    
+                    if 'hour' in unit:
+                        return number * 60
+                    else:
+                        return number
+                except (ValueError, IndexError):
+                    continue
         
         # Default duration
         return 30

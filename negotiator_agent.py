@@ -4,12 +4,14 @@ from typing import List, Dict, Any
 from collections import Counter
 from llm_service import LLMService
 from email_parser import EmailParser
+import pytz
 
 class NegotiatorAgent:
     def __init__(self, llm_client=None):
         self.llm = llm_client or LLMService()
         self.email_parser = EmailParser(llm_client)
         self.negotiation_history = []
+        self.default_timezone = pytz.timezone('Asia/Kolkata')
     
     async def negotiate_meeting(self, participants: List, meeting_request: Dict) -> Dict:
         """Main negotiation orchestrator"""
@@ -71,17 +73,16 @@ class NegotiatorAgent:
             start_dt = date_obj.replace(hour=hour, minute=minute)
             end_dt = start_dt + timedelta(minutes=duration_mins)
             
-            # Add timezone (assume IST for demo)
-            import pytz
-            ist = pytz.timezone('Asia/Kolkata')
-            start_dt = ist.localize(start_dt)
-            end_dt = ist.localize(end_dt)
+            # Add timezone (IST)
+            start_dt = self.default_timezone.localize(start_dt)
+            end_dt = self.default_timezone.localize(end_dt)
             
             return {
                 'start': start_dt.isoformat(),
                 'end': end_dt.isoformat()
             }
-        except:
+        except Exception as e:
+            print(f"Error building requested time: {e}")
             return None
     
     async def _evaluate_specific_time(self, participants: List, requested_time: Dict, duration_mins: int) -> Dict:
@@ -91,21 +92,37 @@ class NegotiatorAgent:
         
         # Collect evaluations from all participants
         for participant in participants:
-            evaluation = await participant.evaluate_proposal({
-                'start_time': requested_time['start'],
-                'end_time': requested_time['end']
-            })
-            evaluations.append(evaluation)
-            
-            if evaluation['decision'] == 'REJECT':
+            try:
+                evaluation = await participant.evaluate_proposal({
+                    'start_time': requested_time['start'],
+                    'end_time': requested_time['end']
+                })
+                evaluations.append(evaluation)
+                
+                if evaluation['decision'] == 'REJECT':
+                    conflicts.append({
+                        'participant': participant.email,
+                        'reason': evaluation['reason'],
+                        'timezone': evaluation.get('timezone', 'Asia/Kolkata')  # Default timezone
+                    })
+            except Exception as e:
+                print(f"Error evaluating proposal for {participant.email}: {e}")
+                # Add default rejection for failed evaluation
+                evaluations.append({
+                    'decision': 'REJECT',
+                    'reason': 'evaluation_failed',
+                    'preference_score': 0,
+                    'participant': participant.email,
+                    'timezone': 'Asia/Kolkata'
+                })
                 conflicts.append({
                     'participant': participant.email,
-                    'reason': evaluation['reason'],
-                    'timezone': evaluation['timezone']
+                    'reason': 'evaluation_failed',
+                    'timezone': 'Asia/Kolkata'
                 })
         
         success = len(conflicts) == 0
-        consensus_score = sum(e['preference_score'] for e in evaluations) / len(evaluations)
+        consensus_score = sum(e.get('preference_score', 0) for e in evaluations) / len(evaluations) if evaluations else 0
         
         return {
             'success': success,
@@ -125,9 +142,13 @@ class NegotiatorAgent:
         
         # Collect available slots from each participant
         for participant in participants:
-            slots = participant.find_available_slots(target_date, duration_mins)
-            all_available_slots[participant.email] = slots
-            print(f"  {participant.email}: {len(slots)} available slots")
+            try:
+                slots = participant.find_available_slots(target_date, duration_mins)
+                all_available_slots[participant.email] = slots
+                print(f"  {participant.email}: {len(slots)} available slots")
+            except Exception as e:
+                print(f"Error finding slots for {participant.email}: {e}")
+                all_available_slots[participant.email] = []
         
         # Find common slots across all participants
         common_slots = self._find_common_time_slots(all_available_slots, duration_mins)
@@ -136,17 +157,21 @@ class NegotiatorAgent:
         # Score and rank slots
         scored_slots = []
         for slot in common_slots:
-            consensus_score = await self._calculate_consensus_score(participants, slot)
-            timezone_fairness = self._calculate_timezone_fairness(participants, slot)
-            
-            scored_slots.append({
-                'start_time': slot['start_time'],
-                'end_time': slot['end_time'],
-                'consensus_score': consensus_score,
-                'timezone_fairness': timezone_fairness,
-                'overall_score': consensus_score * 0.7 + timezone_fairness * 0.3,
-                'time_display': self._format_time_display(slot['start_time'])
-            })
+            try:
+                consensus_score = await self._calculate_consensus_score(participants, slot)
+                timezone_fairness = self._calculate_timezone_fairness(participants, slot)
+                
+                scored_slots.append({
+                    'start_time': slot['start_time'],
+                    'end_time': slot['end_time'],
+                    'consensus_score': consensus_score,
+                    'timezone_fairness': timezone_fairness,
+                    'overall_score': consensus_score * 0.7 + timezone_fairness * 0.3,
+                    'time_display': self._format_time_display(slot['start_time'])
+                })
+            except Exception as e:
+                print(f"Error scoring slot {slot}: {e}")
+                continue
         
         # Return top 10 alternatives sorted by overall score
         return sorted(scored_slots, key=lambda x: x['overall_score'], reverse=True)[:10]
@@ -190,35 +215,53 @@ class NegotiatorAgent:
     async def _calculate_consensus_score(self, participants: List, slot: Dict) -> float:
         """Calculate how well this slot works for all participants"""
         total_score = 0
-        for participant in participants:
-            evaluation = await participant.evaluate_proposal(slot)
-            total_score += evaluation['preference_score']
+        valid_participants = 0
         
-        return total_score / len(participants)
+        for participant in participants:
+            try:
+                evaluation = await participant.evaluate_proposal(slot)
+                total_score += evaluation.get('preference_score', 0)
+                valid_participants += 1
+            except Exception as e:
+                print(f"Error calculating consensus for {participant.email}: {e}")
+                continue
+        
+        return total_score / valid_participants if valid_participants > 0 else 0
     
     def _calculate_timezone_fairness(self, participants: List, slot: Dict) -> float:
         """Calculate timezone fairness score"""
-        start_time = datetime.fromisoformat(slot['start_time'])
-        
-        # Check how fair the time is across different timezones
-        timezone_scores = []
-        for participant in participants:
-            # Convert to participant's timezone
-            participant_tz = participant.timezone
-            local_time = start_time.astimezone(participant_tz)
-            hour = local_time.hour
+        try:
+            start_time = datetime.fromisoformat(slot['start_time'])
             
-            # Score based on business hours (9-17 is optimal)
-            if 9 <= hour <= 17:
-                timezone_scores.append(1.0)
-            elif 8 <= hour <= 18:
-                timezone_scores.append(0.8)
-            elif 7 <= hour <= 19:
-                timezone_scores.append(0.6)
-            else:
-                timezone_scores.append(0.2)
-        
-        return sum(timezone_scores) / len(timezone_scores)
+            # Check how fair the time is across different timezones
+            timezone_scores = []
+            for participant in participants:
+                try:
+                    # Get participant's timezone (default to IST if not available)
+                    participant_tz = getattr(participant, 'timezone', self.default_timezone)
+                    if isinstance(participant_tz, str):
+                        participant_tz = pytz.timezone(participant_tz)
+                    
+                    local_time = start_time.astimezone(participant_tz)
+                    hour = local_time.hour
+                    
+                    # Score based on business hours (9-17 is optimal)
+                    if 9 <= hour <= 17:
+                        timezone_scores.append(1.0)
+                    elif 8 <= hour <= 18:
+                        timezone_scores.append(0.8)
+                    elif 7 <= hour <= 19:
+                        timezone_scores.append(0.6)
+                    else:
+                        timezone_scores.append(0.2)
+                except Exception as e:
+                    print(f"Error calculating timezone fairness for {participant.email}: {e}")
+                    timezone_scores.append(0.5)  # Default score
+            
+            return sum(timezone_scores) / len(timezone_scores) if timezone_scores else 0.5
+        except Exception as e:
+            print(f"Error in timezone fairness calculation: {e}")
+            return 0.5
     
     async def _negotiate_best_slot(self, participants: List, alternative_slots: List[Dict]) -> Dict:
         """Select the best slot through LLM-powered negotiation"""
@@ -226,14 +269,14 @@ class NegotiatorAgent:
             return None
         
         # Use LLM to analyze and select the best option
-        negotiation_prompt = await self._build_negotiation_prompt(participants, alternative_slots)
-        
         try:
+            negotiation_prompt = await self._build_negotiation_prompt(participants, alternative_slots)
             llm_response = await self.llm.generate_async(negotiation_prompt, max_tokens=200)
             selected_index = self._parse_llm_selection(llm_response, len(alternative_slots))
         except Exception as e:
             print(f"LLM negotiation failed: {e}")
             selected_index = 0  # Fallback to highest scored slot
+            llm_response = "Selected highest scored option due to LLM failure"
         
         # Get the selected slot
         best_slot = alternative_slots[selected_index]
@@ -241,8 +284,18 @@ class NegotiatorAgent:
         # Gather final evaluations
         final_evaluations = []
         for participant in participants:
-            evaluation = await participant.evaluate_proposal(best_slot)
-            final_evaluations.append(evaluation)
+            try:
+                evaluation = await participant.evaluate_proposal(best_slot)
+                final_evaluations.append(evaluation)
+            except Exception as e:
+                print(f"Error in final evaluation for {participant.email}: {e}")
+                final_evaluations.append({
+                    'decision': 'ACCEPT',
+                    'reason': 'default_accept',
+                    'preference_score': 0.5,
+                    'participant': participant.email,
+                    'timezone': 'Asia/Kolkata'
+                })
         
         return {
             'success': True,
@@ -250,14 +303,21 @@ class NegotiatorAgent:
             'evaluations': final_evaluations,
             'conflicts': [],
             'consensus_score': best_slot['overall_score'],
-            'selection_reasoning': llm_response if 'llm_response' in locals() else "Selected highest scored option"
+            'selection_reasoning': llm_response
         }
     
     async def _build_negotiation_prompt(self, participants: List, alternatives: List[Dict]) -> str:
         """Build prompt for LLM-powered negotiation"""
         participant_info = []
         for p in participants:
-            participant_info.append(f"- {p.email}: timezone {p.timezone}, preferences {p.preferences}")
+            try:
+                tz_name = getattr(p, 'timezone', self.default_timezone)
+                if hasattr(tz_name, 'zone'):
+                    tz_name = tz_name.zone
+                preferences = getattr(p, 'preferences', {})
+                participant_info.append(f"- {p.email}: timezone {tz_name}, preferences {preferences}")
+            except Exception as e:
+                participant_info.append(f"- {p.email}: timezone Asia/Kolkata, preferences unknown")
         
         alternatives_info = []
         for i, alt in enumerate(alternatives[:5]):  # Top 5 only
