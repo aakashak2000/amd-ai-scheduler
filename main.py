@@ -1,148 +1,179 @@
-"""
-Simple AMD AI Meeting Scheduler
-"""
 from flask import Flask, request, jsonify
-import time
-from datetime import datetime, timedelta
-
-from agents.email_parser import EmailParserAgent
-from agents.schedule_coordinator import ScheduleCoordinatorAgent
-from services.llm_service import LLMService
-from services.calendar_service import CalendarService
-from utils.json_validator import validate_input, validate_output
+import asyncio
+import json
+from datetime import datetime
+import traceback
+from coordinator_agent import CoordinatorAgent
+from mock_data import TEST_SCENARIOS
+from json_validator import sanitize_json_request
 
 app = Flask(__name__)
 
-# Initialize system components
-llm_service = LLMService()
-calendar_service = CalendarService()
-email_parser = EmailParserAgent(llm_service)
-schedule_coordinator = ScheduleCoordinatorAgent(calendar_service)
+# Initialize the coordinator
+coordinator = CoordinatorAgent()
 
 @app.route('/receive', methods=['POST'])
 def receive():
-    """Process meeting request"""
-    start_time = time.time()
-    
+    """Required endpoint for hackathon submission"""
     try:
-        request_data = request.get_json()
+        data = request.get_json()
         
-        if not request_data:
+        if not data:
             return jsonify({"error": "No JSON data provided"}), 400
         
-        request_id = request_data.get('Request_id', 'Unknown')
-        print(f"Processing Request: {request_id}")
+        print(f"\nReceived Request: {data.get('Request_id', 'unknown')}")
+        print(f"Email Content: {data.get('EmailContent', '')}")
+        print(f"Attendees: {len(data.get('Attendees', []))} participants")
         
-        # Validate input
-        is_valid, errors = validate_input(request_data)
-        if not is_valid:
-            return jsonify({"error": "Invalid input", "details": errors}), 400
+        # Sanitize input
+        sanitized_data = sanitize_json_request(data)
         
-        # Process meeting request
-        result = process_meeting_request(request_data)
+        # Process with multi-agent system
+        result = asyncio.run(coordinator.schedule_meeting(sanitized_data))
         
-        # Log processing time
-        total_time = time.time() - start_time
-        print(f"Request processed in {total_time:.2f}s")
+        success = result.get('EventStart') is not None and 'error' not in result
+        print(f"Processing complete - Success: {success}")
+        
+        if success:
+            print(f"Scheduled: {result['EventStart']} to {result['EventEnd']}")
         
         return jsonify(result)
         
     except Exception as e:
-        print(f"Error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
-def process_meeting_request(request_data):
-    """Process meeting request with simplified logic"""
-    
-    # Parse email content
-    email_content = request_data.get("EmailContent", "")
-    subject = request_data.get("Subject", "")
-    meeting_details = email_parser.parse_meeting_request(email_content, subject)
-    
-    # Get attendees
-    attendees = request_data.get("Attendees", [])
-    attendee_emails = [att["email"] for att in attendees]
-    sender_email = request_data.get("From", "")
-    all_attendees = [sender_email] + attendee_emails
-    
-    # Coordinate meeting
-    coordination_result = schedule_coordinator.coordinate_meeting(all_attendees, meeting_details)
-    
-    # Format response
-    return format_response(request_data, coordination_result, all_attendees, meeting_details)
-
-def format_response(request_data, coordination_result, attendees, meeting_details):
-    """Format response with professional competition-winning MetaData"""
-    
-    scheduled_time = coordination_result.get("scheduled_time", {})
-    start_time = scheduled_time.get("start", "2025-07-17T10:30:00+05:30")
-    end_time = scheduled_time.get("end", "2025-07-17T11:00:00+05:30")
-    
-    # Calculate duration
-    start_dt = datetime.fromisoformat(start_time.replace('+05:30', ''))
-    end_dt = datetime.fromisoformat(end_time.replace('+05:30', ''))
-    duration_mins = int((end_dt - start_dt).total_seconds() / 60)
-    
-    # Create enhanced attendee events with existing calendar data
-    attendee_events = []
-    for email in attendees:
-        existing_events = calendar_service.get_events(email, "2025-07-17T00:00:00+05:30", "2025-07-17T23:59:59+05:30")
-        
-        new_meeting = {
-            "StartTime": start_time,
-            "EndTime": end_time,
-            "NumAttendees": len(attendees),
-            "Attendees": attendees,
-            "Summary": request_data.get("Subject", "Meeting")
-        }
-        
-        all_events = existing_events + [new_meeting]
-        
-        attendee_events.append({
-            "email": email,
-            "events": all_events
-        })
-    
-    # PROFESSIONAL COMPETITION-WINNING METADATA
-    metadata = {
-        # Core Decision Process
-        "decision_process": {
-            "steps_taken": coordination_result.get("reasoning_steps", []),
-            "alternatives_considered": coordination_result.get("alternatives_considered", []),
-            "conflicts_resolved": len(coordination_result.get("conflict_analysis", [])),
-            "ai_confidence": coordination_result.get("confidence_score", 0.8)
-        },
-        
-        # Conflict Resolution Intelligence
-        "conflict_resolution": {
-            "conflicts_detected": coordination_result.get("conflict_analysis", []),
-            "negotiation_process": coordination_result.get("negotiation_details", []),
-            "alternative_slots_evaluated": len(coordination_result.get("alternatives_considered", [])),
-            "resolution_success": True
-        },
-        
-        # Professional AI Recommendations
-        "ai_recommendations": coordination_result.get("professional_recommendations", [])
-    }
-    
-    return {
-        **request_data,
-        "Attendees": attendee_events,
-        "EventStart": start_time,
-        "EventEnd": end_time,
-        "Duration_mins": str(duration_mins),
-        "MetaData": metadata
-    }
+        print(f"Error processing request: {e}")
+        traceback.print_exc()
+        return jsonify({
+            "error": str(e),
+            "Request_id": request.get_json().get('Request_id', 'unknown') if request.get_json() else 'unknown'
+        }), 500
 
 @app.route('/health', methods=['GET'])
 def health():
-    """Health check"""
+    """Health check endpoint"""
+    try:
+        status = asyncio.run(coordinator.get_system_status())
+        return jsonify(status)
+    except Exception as e:
+        return jsonify({
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }), 500
+
+@app.route('/demo/<scenario_name>', methods=['GET'])
+def demo_scenario(scenario_name):
+    """Demo endpoint for testing scenarios"""
+    if scenario_name not in TEST_SCENARIOS:
+        available_scenarios = list(TEST_SCENARIOS.keys())
+        return jsonify({
+            "error": "Scenario not found",
+            "available_scenarios": available_scenarios
+        }), 404
+    
+    try:
+        scenario_data = TEST_SCENARIOS[scenario_name]
+        print(f"\nRunning Demo Scenario: {scenario_name}")
+        print(f"Scenario description: {scenario_data.get('EmailContent', '')}")
+        
+        result = asyncio.run(coordinator.schedule_meeting(scenario_data))
+        
+        return jsonify({
+            "scenario": scenario_name,
+            "input": scenario_data,
+            "result": result,
+            "success": result.get('EventStart') is not None and 'error' not in result
+        })
+        
+    except Exception as e:
+        print(f"Demo scenario error: {e}")
+        traceback.print_exc()
+        return jsonify({
+            "scenario": scenario_name,
+            "error": str(e)
+        }), 500
+
+@app.route('/test', methods=['POST'])
+def test_custom():
+    """Test endpoint for custom requests"""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+        
+        # Add default values if missing
+        if 'Duration_mins' not in data:
+            data['Duration_mins'] = '30'
+        if 'Request_id' not in data:
+            data['Request_id'] = f"test_{datetime.now().strftime('%H%M%S')}"
+        if 'Attendees' not in data:
+            data['Attendees'] = []
+        
+        print(f"\nTesting Custom Request: {data['Request_id']}")
+        
+        result = asyncio.run(coordinator.schedule_meeting(data))
+        return jsonify(result)
+        
+    except Exception as e:
+        print(f"Test error: {e}")
+        traceback.print_exc()
+        return jsonify({
+            "error": str(e),
+            "request_id": data.get('Request_id', 'unknown') if 'data' in locals() else 'unknown'
+        }), 500
+
+@app.route('/scenarios', methods=['GET'])
+def list_scenarios():
+    """List available demo scenarios"""
+    scenarios_info = {}
+    for name, scenario in TEST_SCENARIOS.items():
+        scenarios_info[name] = {
+            'description': scenario.get('EmailContent', ''),
+            'attendees_count': len(scenario.get('Attendees', [])),
+            'duration': scenario.get('Duration_mins', '30'),
+            'endpoint': f"/demo/{name}"
+        }
+    
     return jsonify({
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat()
+        "available_scenarios": scenarios_info,
+        "total_scenarios": len(TEST_SCENARIOS)
     })
 
-if __name__ == '__main__':
-    print("Starting AMD AI Scheduler...")
-    print("API available at: http://0.0.0.0:5000")
-    app.run(host='0.0.0.0', port=5000, debug=False)
+@app.route('/llm/status', methods=['GET'])
+def llm_status():
+    """Check LLM service status"""
+    try:
+        status = coordinator.llm.health_check()
+        return jsonify(status)
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
+
+@app.route('/validate', methods=['POST'])
+def validate_request():
+    """Validate a meeting request without processing"""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+        
+        # Validate the request
+        from json_validator import validate_json_request
+        validation_result = validate_json_request(data)
+        
+        return jsonify({
+            "validation_result": validation_result,
+            "sanitized_data": sanitize_json_request(data) if validation_result['valid'] else None
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "validation_result": {
+                "valid": False,
+                "errors": [str(e)]
+            }
+        }), 500
