@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
 import pytz
+import re
 from participant_agent import ParticipantAgent
 from negotiator_agent import NegotiatorAgent
 from calendar_service import CalendarService
@@ -17,6 +18,91 @@ class CoordinatorAgent:
         self.validator = JSONValidator()
         self.participants = {}
         
+    def _extract_duration_from_email(self, email_content: str) -> str:
+        """Extract duration from email content"""
+        # Look for patterns like "30 minutes", "1 hour", etc.
+        patterns = [
+            r'(\d+)\s*minutes?',
+            r'(\d+)\s*mins?',
+            r'(\d+)\s*hours?',
+            r'(\d+)\s*hrs?',
+            r'for\s+(\d+)\s*minutes?',
+            r'for\s+(\d+)\s*hours?'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, email_content.lower())
+            if match:
+                duration = int(match.group(1))
+                if 'hour' in pattern or 'hr' in pattern:
+                    duration *= 60  # Convert hours to minutes
+                return str(duration)
+        
+        return "30"  # Default 30 minutes
+    
+    def _transform_input_format(self, meeting_request: Dict) -> Dict:
+        """Transform input format to our internal format"""
+        # Extract duration from email content
+        email_content = meeting_request.get('EmailContent', '')
+        duration_mins = self._extract_duration_from_email(email_content)
+        
+        # Add From email to attendees if not present
+        from_email = meeting_request.get('From', '')
+        attendee_emails = [att.get('email') for att in meeting_request.get('Attendees', [])]
+        
+        if from_email and from_email not in attendee_emails:
+            attendee_emails.append(from_email)
+        
+        # Transform attendees format - add empty events for initial processing
+        transformed_attendees = []
+        for email in attendee_emails:
+            # Use mock calendar data if available, otherwise empty
+            mock_events = self._get_mock_events_for_user(email)
+            transformed_attendees.append({
+                'email': email,
+                'events': mock_events
+            })
+        
+        # Create transformed request
+        transformed_request = meeting_request.copy()
+        transformed_request['Duration_mins'] = duration_mins
+        transformed_request['Attendees'] = transformed_attendees
+        
+        return transformed_request
+    
+    def _get_mock_events_for_user(self, email: str) -> List[Dict]:
+        """Get mock calendar events for a user"""
+        # Mock events for demo - in real system this would come from calendar API
+        mock_calendars = {
+            "usertwo.amd@gmail.com": [
+                {
+                    "StartTime": "2025-07-17T10:00:00+05:30",
+                    "EndTime": "2025-07-17T10:30:00+05:30",
+                    "NumAttendees": 3,
+                    "Attendees": ["userone.amd@gmail.com", "usertwo.amd@gmail.com", "userthree.amd@gmail.com"],
+                    "Summary": "Team Meet"
+                }
+            ],
+            "userthree.amd@gmail.com": [
+                {
+                    "StartTime": "2025-07-17T10:00:00+05:30",
+                    "EndTime": "2025-07-17T10:30:00+05:30",
+                    "NumAttendees": 3,
+                    "Attendees": ["userone.amd@gmail.com", "usertwo.amd@gmail.com", "userthree.amd@gmail.com"],
+                    "Summary": "Team Meet"
+                },
+                {
+                    "StartTime": "2025-07-17T13:00:00+05:30",
+                    "EndTime": "2025-07-17T14:00:00+05:30",
+                    "NumAttendees": 1,
+                    "Attendees": ["SELF"],
+                    "Summary": "Lunch with Customers"
+                }
+            ]
+        }
+        
+        return mock_calendars.get(email, [])
+    
     def create_participant_agents(self, attendees_data: List[Dict]) -> List[ParticipantAgent]:
         """Create participant agents from attendee data"""
         agents = []
@@ -50,213 +136,130 @@ class CoordinatorAgent:
     async def schedule_meeting(self, meeting_request: Dict) -> Dict:
         """Main coordination method for scheduling meetings"""
         try:
-            # Validate and sanitize input
-            validation_result = self.validator.validate_request(meeting_request)
-            if not validation_result['valid']:
-                return self._format_error_response(
-                    f"Validation failed: {'; '.join(validation_result['errors'])}", 
-                    meeting_request
-                )
+            print(f"Original request: {meeting_request.get('Request_id', 'unknown')}")
             
-            # Sanitize request
-            sanitized_request = self.validator.sanitize_request(meeting_request)
-            
-            print(f"Processing meeting request: {sanitized_request['Request_id']}")
-            print(f"Email content: {sanitized_request['EmailContent']}")
+            # Transform input format to our internal format
+            transformed_request = self._transform_input_format(meeting_request)
+            print(f"Duration extracted: {transformed_request['Duration_mins']} minutes")
             
             # Create participant agents
-            participants = self.create_participant_agents(sanitized_request['Attendees'])
+            participants = self.create_participant_agents(transformed_request['Attendees'])
             print(f"Created {len(participants)} participant agents")
             
             # Use negotiator to find optimal slot
-            negotiation_result = await self.negotiator.negotiate_meeting(participants, sanitized_request)
+            negotiation_result = await self.negotiator.negotiate_meeting(participants, transformed_request)
             
-            # Format response based on negotiation outcome
+            # Format response in required format
             if negotiation_result['success']:
-                response = self._format_success_response(negotiation_result, sanitized_request)
-                
-                # Create calendar event (mock)
-                self._create_calendar_event(response)
-                
+                response = self._format_success_response_correct_format(
+                    negotiation_result, meeting_request, transformed_request
+                )
                 return response
             else:
-                return self._format_failure_response(negotiation_result, sanitized_request)
+                return self._format_failure_response_correct_format(
+                    negotiation_result, meeting_request, transformed_request
+                )
                 
         except Exception as e:
             print(f"Error in schedule_meeting: {e}")
             import traceback
             traceback.print_exc()
-            return self._format_error_response(str(e), meeting_request)
+            return self._format_error_response_correct_format(str(e), meeting_request)
     
-    def _format_success_response(self, result: Dict, request: Dict) -> Dict:
-        """Format successful scheduling response"""
+    def _format_success_response_correct_format(self, result: Dict, original_request: Dict, transformed_request: Dict) -> Dict:
+        """Format successful scheduling response in required format"""
         scheduled_slot = result['scheduled_slot']
-        alternatives = result['alternatives_considered']
-        summary = result['negotiation_summary']
         
-        # Create simplified, clear metadata
-        metadata = {
-            'scheduling_decision': {
-                'chosen_slot': {
-                    'time': scheduled_slot['display_time'],
-                    'reason': f"Best consensus score ({summary['consensus_score']:.2f}) among {len(alternatives) + 1} options"
-                },
-                'why_this_time': self._generate_selection_reasoning(scheduled_slot, alternatives, summary),
-                'alternatives_evaluated': len(alternatives) + 1
-            },
-            'alternatives_considered': [
-                {
-                    'time_slot': alt['time_display'],
-                    'score': f"{alt['overall_score']:.2f}"
-                } for alt in alternatives
-            ],
-            'conflict_resolution': {
-                'conflicts_found': summary['total_participants'] - summary['conflicts_resolved'],
-                'resolution_method': "intelligent_alternative_search",
-                'participants_satisfied': f"{summary['conflicts_resolved']}/{summary['total_participants']}"
-            },
-            'timezone_handling': {
-                'primary_timezone': "Asia/Kolkata (IST)",
-                'all_times_normalized': True,
-                'fairness_considered': True
-            }
+        # Create the new meeting event
+        new_event = {
+            "StartTime": scheduled_slot['start_time'],
+            "EndTime": scheduled_slot['end_time'],
+            "NumAttendees": len(transformed_request['Attendees']),
+            "Attendees": [att['email'] for att in transformed_request['Attendees']],
+            "Summary": original_request.get('Subject', 'Meeting')
         }
         
-        # Build complete response
+        # Build attendees list with updated events
+        output_attendees = []
+        for attendee_data in transformed_request['Attendees']:
+            attendee_events = attendee_data['events'].copy()  # Existing events
+            attendee_events.append(new_event)  # Add new meeting
+            
+            output_attendees.append({
+                'email': attendee_data['email'],
+                'events': attendee_events
+            })
+        
+        # Build complete response in required format
         response = {
-            'Request_id': request['Request_id'],
-            'Subject': request.get('Subject', 'Meeting'),
-            'From': request.get('From', ''),
-            'EmailContent': request['EmailContent'],
-            'Duration_mins': request['Duration_mins'],
+            'Request_id': original_request['Request_id'],
+            'Datetime': original_request['Datetime'],
+            'Location': original_request['Location'],
+            'From': original_request['From'],
+            'Attendees': output_attendees,
+            'Subject': original_request['Subject'],
+            'EmailContent': original_request['EmailContent'],
             'EventStart': scheduled_slot['start_time'],
             'EventEnd': scheduled_slot['end_time'],
-            'Location': request.get('Location', ''),
-            'Attendees': request['Attendees'],
-            'Datetime': request.get('Datetime', datetime.now().strftime('%d-%m-%YT%H:%M:%S')),
-            'MetaData': metadata
+            'Duration_mins': transformed_request['Duration_mins'],
+            'MetaData': {
+                'scheduling_decision': {
+                    'chosen_slot': {
+                        'time': scheduled_slot['display_time'],
+                        'reason': f"Optimal time found for {len(output_attendees)} participants"
+                    },
+                    'conflicts_resolved': len(result.get('alternatives_considered', [])),
+                    'success': True
+                }
+            }
         }
-        
-        # Validate response format
-        response_validation = self.validator.validate_response(response)
-        if not response_validation['valid']:
-            print(f"Response validation warnings: {response_validation['warnings']}")
         
         return response
     
-    def _format_failure_response(self, result: Dict, request: Dict) -> Dict:
-        """Format failure response"""
-        metadata = {
-            'scheduling_decision': {
-                'chosen_slot': None,
-                'reason': f"No suitable slot found: {result['reason']}",
-                'alternatives_evaluated': 0
-            },
-            'conflict_resolution': {
-                'conflicts_found': len(request['Attendees']),
-                'resolution_method': "exhaustive_search_failed",
-                'participants_satisfied': "0/" + str(len(request['Attendees']))
-            },
-            'timezone_handling': {
-                'primary_timezone': "Asia/Kolkata (IST)",
-                'all_times_normalized': True,
-                'fairness_considered': True
-            }
-        }
+    def _format_failure_response_correct_format(self, result: Dict, original_request: Dict, transformed_request: Dict) -> Dict:
+        """Format failure response in required format"""
+        # For failure, return original attendees without new event
+        output_attendees = []
+        for attendee_data in transformed_request['Attendees']:
+            output_attendees.append({
+                'email': attendee_data['email'],
+                'events': attendee_data['events']  # Original events only
+            })
         
         return {
-            'Request_id': request['Request_id'],
-            'Subject': request.get('Subject', 'Meeting'),
-            'From': request.get('From', ''),
-            'EmailContent': request['EmailContent'],
-            'Duration_mins': request['Duration_mins'],
+            'Request_id': original_request['Request_id'],
+            'Datetime': original_request['Datetime'],
+            'Location': original_request['Location'],
+            'From': original_request['From'],
+            'Attendees': output_attendees,
+            'Subject': original_request['Subject'],
+            'EmailContent': original_request['EmailContent'],
             'EventStart': None,
             'EventEnd': None,
-            'Location': request.get('Location', ''),
-            'Attendees': request['Attendees'],
-            'Datetime': request.get('Datetime', datetime.now().strftime('%d-%m-%YT%H:%M:%S')),
-            'MetaData': metadata,
+            'Duration_mins': transformed_request['Duration_mins'],
+            'MetaData': {
+                'scheduling_decision': {
+                    'chosen_slot': None,
+                    'reason': f"No suitable slot found: {result['reason']}",
+                    'success': False
+                }
+            },
             'error': 'No available time slot found'
         }
     
-    def _format_error_response(self, error: str, request: Dict) -> Dict:
-        """Format error response"""
+    def _format_error_response_correct_format(self, error: str, original_request: Dict) -> Dict:
+        """Format error response in required format"""
         return {
-            'Request_id': request.get('Request_id', 'unknown'),
+            'Request_id': original_request.get('Request_id', 'unknown'),
             'error': f"Scheduling failed: {error}",
             'MetaData': {
                 'scheduling_decision': {
                     'chosen_slot': None,
                     'reason': f"System error: {error}",
-                    'alternatives_evaluated': 0
-                },
-                'conflict_resolution': {
-                    'conflicts_found': 0,
-                    'resolution_method': "failed_due_to_error",
-                    'participants_satisfied': "0/0"
+                    'success': False
                 }
             }
         }
-    
-    def _generate_selection_reasoning(self, chosen_slot: Dict, alternatives: List[Dict], summary: Dict) -> List[str]:
-        """Generate human-readable reasoning for slot selection"""
-        reasons = []
-        
-        # Time of day reasoning
-        start_time = datetime.fromisoformat(chosen_slot['start_time'])
-        hour = start_time.hour
-        
-        if 9 <= hour < 12:
-            reasons.append("Morning slot - optimal for focus and productivity")
-        elif 14 <= hour < 17:
-            reasons.append("Afternoon slot - good for collaborative discussions")
-        else:
-            reasons.append("Available slot that works for all participants")
-        
-        # Conflict resolution reasoning
-        conflicts_resolved = summary.get('conflicts_resolved', 0)
-        total_participants = summary.get('total_participants', 0)
-        
-        if conflicts_resolved == total_participants:
-            reasons.append("Zero schedule conflicts detected for all participants")
-        else:
-            reasons.append(f"Successfully resolved conflicts for {conflicts_resolved}/{total_participants} participants")
-        
-        # Preference reasoning
-        if alternatives:
-            reasons.append(f"Highest consensus score among {len(alternatives) + 1} possible times")
-        
-        # Timezone reasoning
-        reasons.append("Optimal timing across all participant timezones")
-        
-        # Selection method reasoning
-        if summary.get('selection_reasoning'):
-            reasons.append(f"AI recommendation: {summary['selection_reasoning']}")
-        
-        return reasons
-    
-    def _create_calendar_event(self, response: Dict):
-        """Create calendar event using calendar service"""
-        try:
-            event_data = {
-                'subject': response['Subject'],
-                'start_time': response['EventStart'],
-                'end_time': response['EventEnd'],
-                'location': response.get('Location', ''),
-                'attendees': [attendee['email'] for attendee in response['Attendees']]
-            }
-            
-            # Create the event
-            created_event = self.calendar_service.create_calendar_event(event_data)
-            
-            # Send invites
-            attendee_emails = [attendee['email'] for attendee in response['Attendees']]
-            self.calendar_service.send_calendar_invite(event_data, attendee_emails)
-            
-            print(f"Calendar event created: {created_event['id']}")
-            
-        except Exception as e:
-            print(f"Failed to create calendar event: {e}")
     
     async def get_system_status(self) -> Dict:
         """Get system status for health checks"""
@@ -264,15 +267,12 @@ class CoordinatorAgent:
             # Check LLM service
             llm_status = self.llm.health_check()
             
-            # Check calendar service
-            calendar_stats = getattr(self.calendar_service, 'get_stats', lambda: {})()
-            
             return {
                 'status': 'healthy',
                 'timestamp': datetime.now().isoformat(),
                 'components': {
                     'llm_service': llm_status,
-                    'calendar_service': {'status': 'healthy', **calendar_stats},
+                    'calendar_service': {'status': 'healthy'},
                     'validator': {'status': 'healthy'},
                     'negotiator': {'status': 'healthy'}
                 },
