@@ -1,0 +1,52 @@
+{
+  "simple_request": {
+    "Request_id": "demo-simple-001",
+    "Datetime": "12-07-2025T12:34:55",
+    "Location": "IIT Mumbai",
+    "From": "userone.amd@gmail.com",
+    "Attendees": [
+      {"email": "usertwo.amd@gmail.com"}
+    ],
+    "Subject": "Quick Sync",
+    "EmailContent": "Let's have a quick 30-minute sync to discuss project status."
+  },
+  
+  "complex_request": {
+    "Request_id": "demo-complex-001",
+    "Datetime": "12-07-2025T12:34:55",
+    "Location": "IIT Mumbai",
+    "From": "userone.amd@gmail.com",
+    "Attendees": [
+      {"email": "usertwo.amd@gmail.com"},
+      {"email": "userthree.amd@gmail.com"},
+      {"email": "userfour.amd@gmail.com"}
+    ],
+    "Subject": "Urgent: Q4 Strategy Meeting",
+    "EmailContent": "We need to urgently discuss our Q4 strategy. This is a high-priority meeting that requires everyone's immediate attention. Let's schedule for 1 hour to thoroughly review our approach."
+  },
+  
+  "conflict_request": {
+    "Request_id": "demo-conflict-001", 
+    "Datetime": "12-07-2025T12:34:55",
+    "Location": "IIT Mumbai",
+    "From": "userone.amd@gmail.com",
+    "Attendees": [
+      {"email": "usertwo.amd@gmail.com"},
+      {"email": "userthree.amd@gmail.com"}
+    ],
+    "Subject": "Team Meeting with Conflicts",
+    "EmailContent": "Let's meet Tuesday at 11 AM to discuss ongoing projects. This might conflict with existing schedules."
+  },
+  
+  "morning_preference": {
+    "Request_id": "demo-morning-001",
+    "Datetime": "12-07-2025T12:34:55", 
+    "Location": "IIT Mumbai",
+    "From": "userone.amd@gmail.com",
+    "Attendees": [
+      {"email": "usertwo.amd@gmail.com"}
+    ],
+    "Subject": "Morning Standup",
+    "EmailContent": "Daily standup meeting in the morning. Prefer 9 AM if possible for 15 minutes."
+  }
+}
