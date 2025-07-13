@@ -9,6 +9,8 @@ from calendar_service import CalendarService
 from llm_service import LLMService
 from json_validator import JSONValidator
 from mock_data import USER_PREFERENCES
+from metadata_framework import record_coordinator, record_request, get_business_metadata
+
 
 class CoordinatorAgent:
     def __init__(self, llm_client=None):
@@ -134,40 +136,93 @@ class CoordinatorAgent:
         return agents
     
     async def schedule_meeting(self, meeting_request: Dict) -> Dict:
-        """Main coordination method for scheduling meetings"""
+        """Main coordination method with business-friendly tracking"""
+        
         try:
-            print(f"Original request: {meeting_request.get('Request_id', 'unknown')}")
+            # Record the initial request
+            record_request(meeting_request)
             
-            # Transform input format to our internal format
+            request_id = meeting_request.get('Request_id', 'unknown')
+            attendees = meeting_request.get('Attendees', [])
+            email_content = meeting_request.get('EmailContent', '')
+            
+            print(f"Original request: {request_id}")
+            
+            # Transform input format
+            record_coordinator(
+                action="parse meeting requirements",
+                outcome=f"extracted details for {len(attendees)} attendees",
+                reasoning=f"Analyzed email content to understand meeting constraints and participant needs"
+            )
+            
             transformed_request = self._transform_input_format(meeting_request)
-            print(f"Duration extracted: {transformed_request['Duration_mins']} minutes")
+            duration_extracted = transformed_request['Duration_mins']
+            
+            print(f"Duration extracted: {duration_extracted} minutes")
             
             # Create participant agents
+            record_coordinator(
+                action="create scheduling assistants",
+                outcome=f"set up {len(attendees)} specialized agents",
+                reasoning="Each participant needs personalized scheduling logic based on their preferences and calendar"
+            )
+            
             participants = self.create_participant_agents(transformed_request['Attendees'])
             print(f"Created {len(participants)} participant agents")
+            
+            # Delegate to negotiator
+            record_coordinator(
+                action="initiate negotiation process",
+                outcome="handed off to negotiation specialist",
+                reasoning="Negotiator will find optimal time by balancing all participant constraints and preferences"
+            )
             
             # Use negotiator to find optimal slot
             negotiation_result = await self.negotiator.negotiate_meeting(participants, transformed_request)
             
-            # Format response in required format
+            # Handle results
             if negotiation_result['success']:
+                scheduled_time = negotiation_result['scheduled_slot']['start_time']
+                
+                record_coordinator(
+                    action="finalize successful scheduling",
+                    outcome=f"confirmed meeting for {scheduled_time}",
+                    reasoning="All participants confirmed availability and the optimal time was selected"
+                )
+                
                 response = self._format_success_response_correct_format(
                     negotiation_result, meeting_request, transformed_request
                 )
                 return response
+                
             else:
-                return self._format_failure_response_correct_format(
-                    negotiation_result, meeting_request, transformed_request
+                failure_reason = negotiation_result['reason']
+                
+                record_coordinator(
+                    action="handle scheduling failure",
+                    outcome=f"no suitable time found",
+                    reasoning=f"Unable to resolve conflicts: {failure_reason}"
                 )
                 
+                response = self._format_failure_response_correct_format(
+                    negotiation_result, meeting_request, transformed_request
+                )
+                return response
+                
         except Exception as e:
+            record_coordinator(
+                action="handle system error",
+                outcome=f"scheduling failed with error",
+                reasoning=f"Unexpected system error prevented completion: {str(e)}"
+            )
+            
             print(f"Error in schedule_meeting: {e}")
             import traceback
             traceback.print_exc()
             return self._format_error_response_correct_format(str(e), meeting_request)
     
     def _format_success_response_correct_format(self, result: Dict, original_request: Dict, transformed_request: Dict) -> Dict:
-        """Format successful scheduling response in required format"""
+        """Format successful scheduling response with business metadata"""
         scheduled_slot = result['scheduled_slot']
         
         # Create the new meeting event
@@ -182,15 +237,18 @@ class CoordinatorAgent:
         # Build attendees list with updated events
         output_attendees = []
         for attendee_data in transformed_request['Attendees']:
-            attendee_events = attendee_data['events'].copy()  # Existing events
-            attendee_events.append(new_event)  # Add new meeting
+            attendee_events = attendee_data['events'].copy()
+            attendee_events.append(new_event)
             
             output_attendees.append({
                 'email': attendee_data['email'],
                 'events': attendee_events
             })
         
-        # Build complete response in required format
+        # Get business summary as clean array
+        business_summary_lines = get_business_metadata().generate_business_summary()
+        
+        # Build response
         response = {
             'Request_id': original_request['Request_id'],
             'Datetime': original_request['Datetime'],
@@ -206,11 +264,12 @@ class CoordinatorAgent:
                 'scheduling_decision': {
                     'chosen_slot': {
                         'time': scheduled_slot['display_time'],
-                        'reason': f"Optimal time found for {len(output_attendees)} participants"
+                        'reason': f"Optimal time for {len(output_attendees)} participants"
                     },
                     'conflicts_resolved': len(result.get('alternatives_considered', [])),
                     'success': True
-                }
+                },
+                'agent_reasoning_summary': business_summary_lines
             }
         }
         

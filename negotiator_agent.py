@@ -5,6 +5,8 @@ from collections import Counter
 from llm_service import LLMService
 from email_parser import EmailParser
 import pytz
+from metadata_framework import record_negotiator, record_slots, record_selection
+
 
 class NegotiatorAgent:
     def __init__(self, llm_client=None):
@@ -14,47 +16,186 @@ class NegotiatorAgent:
         self.default_timezone = pytz.timezone('Asia/Kolkata')
     
     async def negotiate_meeting(self, participants: List, meeting_request: Dict) -> Dict:
-        """Main negotiation orchestrator"""
+        """Advanced negotiation with business-friendly slot analysis"""
+        
         duration_mins = int(meeting_request.get('Duration_mins', 30))
-        
-        # Parse email content to extract requested time and date
         email_content = meeting_request.get('EmailContent', '')
-        parsed_email = self.email_parser.parse_email(email_content)
         
+        # Parse email content for user preferences
+        parsed_email = self.email_parser.parse_email(email_content)
         target_date = parsed_email.get('suggested_date', self._get_default_date())
         requested_time = self._build_requested_time(parsed_email, target_date, duration_mins)
         
         print(f"Negotiating meeting for {len(participants)} participants")
         print(f"Target date: {target_date}, Duration: {duration_mins} minutes")
         
-        # Round 1: Check initial requested time if specified
+        # Check if user requested specific time
         if requested_time and requested_time.get('start'):
+            requested_time_display = datetime.fromisoformat(requested_time['start']).strftime('%I:%M %p')
+            
+            record_negotiator(
+                action="evaluate user-requested time",
+                outcome=f"checking {requested_time_display} as specifically requested",
+                reasoning=f"User specifically asked for {requested_time_display}, so checking if this works for everyone first"
+            )
+            
             print("Evaluating specifically requested time...")
             initial_result = await self._evaluate_specific_time(participants, requested_time, duration_mins)
+            
             if initial_result['success']:
+                consensus_score = initial_result['consensus_score']
+                
+                record_negotiator(
+                    action="confirm requested time",
+                    outcome=f"success - {requested_time_display} works for everyone",
+                    reasoning=f"Perfect outcome - user's preferred time has no conflicts and good participant agreement"
+                )
+                
+                # Record the selection
+                record_selection(
+                    selected_slot={
+                        'time_display': requested_time_display,
+                        'start_time': requested_time['start'],
+                        'end_time': requested_time['end']
+                    },
+                    reasoning=f"Selected {requested_time_display} because it was specifically requested by the user and works perfectly for all {len(participants)} participants. No conflicts found and achieved good consensus among the team."
+                )
+                
                 print("Requested time works for everyone!")
                 return self._create_success_response(initial_result, meeting_request, [])
+                
             else:
-                print(f"Requested time has {len(initial_result['conflicts'])} conflicts")
+                conflicts = initial_result['conflicts']
+                conflict_participants = [c['participant'].split('@')[0].title() for c in conflicts]
+                
+                record_negotiator(
+                    action="analyze requested time conflicts",
+                    outcome=f"conflicts found with {len(conflicts)} participants: {', '.join(conflict_participants)}",
+                    reasoning=f"User's preferred {requested_time_display} doesn't work because of existing commitments"
+                )
+                
+                print(f"Requested time has {len(conflicts)} conflicts")
         
-        # Round 2: Find alternative slots
+        # Find alternative slots
+        record_negotiator(
+            action="search for alternative times",
+            outcome="analyzing all possible meeting slots",
+            reasoning="Since requested time has conflicts, need to find alternative times that work better for everyone"
+        )
+        
         print("Finding alternative time slots...")
         alternative_slots = await self._find_alternative_slots(participants, target_date, duration_mins)
         
         if not alternative_slots:
+            record_negotiator(
+                action="complete comprehensive search",
+                outcome="no viable time slots found",
+                reasoning="Exhaustive analysis of the target date found no times where all participants are available"
+            )
+            
             print("No alternative slots found")
             return self._create_failure_response(meeting_request, "No available slots found")
         
-        print(f"Found {len(alternative_slots)} alternative slots")
+        # Analyze each slot for business summary
+        business_slots = []
+        for slot in alternative_slots:
+            slot_time = datetime.fromisoformat(slot['start_time']).strftime('%I:%M %p')
+            attendee_count = len(participants)  # Assume all can attend if in alternatives
+            
+            # Create business-friendly slot info
+            business_slot = {
+                'time_display': slot_time,
+                'start_time': slot['start_time'],
+                'end_time': slot['end_time'],
+                'attendee_count': attendee_count,
+                'total_participants': len(participants),
+                'overall_score': slot.get('overall_score', 0),
+                'conflicts': []  # Will be populated if needed
+            }
+            business_slots.append(business_slot)
         
-        # Round 3: Negotiate best compromise using LLM
+        # Record all available options
+        record_slots(business_slots)
+        
+        record_negotiator(
+            action="analyze available options",
+            outcome=f"found {len(alternative_slots)} potential meeting times",
+            reasoning=f"Comprehensive analysis identified multiple options, now selecting the best one based on participant preferences"
+        )
+        
+        # Select the best option
         best_slot = await self._negotiate_best_slot(participants, alternative_slots)
         
         if not best_slot:
+            record_negotiator(
+                action="attempt consensus building",
+                outcome="could not reach agreement on any option",
+                reasoning="Multiple time slots available but unable to achieve acceptable consensus among participants"
+            )
+            
             return self._create_failure_response(meeting_request, "Could not find acceptable compromise")
         
-        print(f"Selected best slot: {best_slot['slot']['time_display']}")
+        selected_time = best_slot['slot']['time_display']
+        consensus_score = best_slot['consensus_score']
+        
+        # Create detailed reasoning for selection
+        selection_reasoning = self._create_selection_reasoning(best_slot, alternative_slots, participants)
+        
+        record_negotiator(
+            action="select optimal time",
+            outcome=f"chose {selected_time} as best option",
+            reasoning=f"After analyzing all options, {selected_time} provides the best balance of participant availability and preferences"
+        )
+        
+        # Record the final selection with detailed reasoning
+        record_selection(
+            selected_slot={
+                'time_display': selected_time,
+                'start_time': best_slot['slot']['start_time'],
+                'end_time': best_slot['slot']['end_time']
+            },
+            reasoning=selection_reasoning
+        )
+        
+        print(f"Selected best slot: {selected_time}")
         return self._create_success_response(best_slot, meeting_request, alternative_slots)
+    
+    def _create_selection_reasoning(self, best_slot: Dict, all_slots: List[Dict], participants: List) -> str:
+        """Create detailed business reasoning for slot selection"""
+        selected_time = best_slot['slot']['time_display']
+        consensus_score = best_slot['consensus_score']
+        
+        # Count how many alternatives were considered
+        total_options = len(all_slots)
+        
+        # Analyze why this slot was best
+        reasoning_parts = []
+        
+        # Primary reason - availability
+        reasoning_parts.append(f"Selected {selected_time} after analyzing {total_options} possible times")
+        
+        # Consensus quality
+        if consensus_score >= 0.8:
+            reasoning_parts.append("it achieved excellent agreement among all participants")
+        elif consensus_score >= 0.6:
+            reasoning_parts.append("it provided good balance of everyone's preferences")
+        else:
+            reasoning_parts.append("it was the best available compromise")
+        
+        # Additional factors
+        hour = datetime.fromisoformat(best_slot['slot']['start_time']).hour
+        if 9 <= hour <= 11:
+            reasoning_parts.append("morning timing works well for focus and energy levels")
+        elif 13 <= hour <= 15:
+            reasoning_parts.append("early afternoon timing avoids lunch conflicts")
+        
+        # Participant considerations
+        reasoning_parts.append(f"ensures all {len(participants)} participants can attend")
+        
+        return ". ".join(reasoning_parts).capitalize() + "."
+
+
+
     
     def _build_requested_time(self, parsed_email: Dict, target_date: str, duration_mins: int) -> Dict:
         """Build requested time object from parsed email"""

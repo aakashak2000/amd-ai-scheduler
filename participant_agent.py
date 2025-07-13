@@ -4,6 +4,7 @@ import pytz
 from typing import List, Dict, Any
 import json
 from llm_service import LLMService
+from metadata_framework import record_participant
 
 class ParticipantAgent:
     def __init__(self, email: str, calendar_data: List[Dict], preferences: Dict, llm_client=None):
@@ -88,45 +89,103 @@ class ParticipantAgent:
         return max(0, min(1, score))
     
     async def evaluate_proposal(self, proposed_slot: Dict, context: str = "") -> Dict:
-        """Evaluate a proposed meeting time using LLM"""
+        """Evaluate a proposed meeting time with business-friendly tracking"""
+        
         start_time = datetime.fromisoformat(proposed_slot['start_time'])
         end_time = datetime.fromisoformat(proposed_slot['end_time'])
+        time_display = f"{start_time.strftime('%I:%M %p')} on {start_time.strftime('%A, %B %d')}"
         
-        # Check hard constraints
+        # Check for calendar conflicts
         if self._has_conflict(start_time, end_time):
+            # Find what's conflicting
+            conflicting_events = []
+            for event in self.calendar:
+                event_start = datetime.fromisoformat(event['StartTime'].replace('Z', '+00:00'))
+                event_end = datetime.fromisoformat(event['EndTime'].replace('Z', '+00:00'))
+                
+                # Convert to same timezone for comparison
+                if event_start.tzinfo != start_time.tzinfo:
+                    event_start = event_start.astimezone(start_time.tzinfo)
+                    event_end = event_end.astimezone(start_time.tzinfo)
+                
+                # Check for overlap
+                if not (end_time <= event_start or start_time >= event_end):
+                    conflicting_events.append(event['Summary'])
+            
+            conflict_description = conflicting_events[0] if conflicting_events else "another meeting"
+            
+            # Generate alternatives
+            alternatives = await self._suggest_alternatives(start_time.date(), (end_time - start_time).total_seconds() / 60)
+            
+            # Record the conflict response
+            record_participant(
+                participant_id=self.email,
+                decision="REJECT",
+                reasoning=f"Have a conflict with {conflict_description}",
+                conflict_details=f"conflicts with {conflict_description}"
+            )
+            
             return {
                 'decision': 'REJECT',
                 'reason': 'schedule_conflict',
                 'preference_score': 0,
-                'alternative_suggestions': await self._suggest_alternatives(start_time.date(), 
-                                                                         (end_time - start_time).total_seconds() / 60)
+                'alternative_suggestions': alternatives,
+                'detailed_reasoning': f"Can't attend {time_display} due to {conflict_description}"
             }
         
         # Calculate preference score
         preference_score = self._calculate_preference_score(start_time)
+        hour = start_time.hour
         
-        # Use LLM for nuanced evaluation
+        # Generate business-friendly reasoning
+        if preference_score >= 0.7:
+            if 'morning' in self.preferences.get('preferred_times', []) and 9 <= hour < 12:
+                reasoning = "This is during my preferred morning hours - perfect timing"
+            elif 'afternoon' in self.preferences.get('preferred_times', []) and 13 <= hour < 17:
+                reasoning = "Afternoon works great for me - good energy levels"
+            else:
+                reasoning = "This time works really well with my schedule"
+            decision = 'ACCEPT'
+            
+        elif preference_score >= 0.4:
+            if self.preferences.get('avoid_lunch', False) and 12 <= hour < 14:
+                reasoning = "Not my ideal time since it's during lunch, but I can make it work"
+            else:
+                reasoning = "This time is okay for me - not perfect but workable"
+            decision = 'CONDITIONAL_ACCEPT'
+            
+        else:
+            if hour < 9:
+                reasoning = "Too early for me - I prefer later in the day"
+            elif hour > 17:
+                reasoning = "Too late in the day - I typically wrap up by 5 PM"
+            elif 12 <= hour < 14:
+                reasoning = "This conflicts with my lunch break preferences"
+            else:
+                reasoning = "This time doesn't work well with my schedule preferences"
+            decision = 'REJECT'
+        
+        # Use LLM for additional context
         llm_evaluation = await self._evaluate_with_llm(proposed_slot, preference_score)
         
-        # Decision threshold
-        if preference_score >= 0.6:
-            decision = 'ACCEPT'
-            reason = 'good_time_match'
-        elif preference_score >= 0.3:
-            decision = 'CONDITIONAL_ACCEPT'
-            reason = 'acceptable_but_not_ideal'
-        else:
-            decision = 'REJECT'
-            reason = 'poor_time_preference'
+        # Record the decision
+        record_participant(
+            participant_id=self.email,
+            decision=decision,
+            reasoning=reasoning,
+            conflict_details=None
+        )
         
         return {
             'decision': decision,
-            'reason': reason,
+            'reason': 'preference_based',
             'preference_score': preference_score,
             'participant': self.email,
             'timezone': str(self.timezone),
-            'llm_reasoning': llm_evaluation
+            'llm_reasoning': llm_evaluation,
+            'detailed_reasoning': reasoning
         }
+
     
     async def _evaluate_with_llm(self, proposed_slot: Dict, preference_score: float) -> str:
         """Use LLM to generate evaluation reasoning"""

@@ -89,7 +89,7 @@ VALIDATION_RULES = {
     'max_meeting_duration': 480,  # 8 hours
     'max_attendees': 20,
     'max_date_range_days': 30,
-    'required_fields': ['EmailContent', 'Attendees', 'Duration_mins'],
+    'required_fields': ['EmailContent', 'Attendees']
 }
 
 def get_config() -> Dict[str, Any]:
