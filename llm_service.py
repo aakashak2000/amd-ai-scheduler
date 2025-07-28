@@ -7,7 +7,7 @@ class LLMService:
     def __init__(self, config: Dict = None):
         self.config = config or {}
         self.base_url = self.config.get('base_url', 'http://localhost:8000')
-        self.model_name = self.config.get('model_name', 'mixtral-8x7b')
+        self.model_name = self.config.get('model_name', '   ')
         self.timeout = self.config.get('timeout', 5)  # Reduced timeout
         self.max_retries = self.config.get('max_retries', 1)  # Reduced retries
         self.use_mock = True  # Force mock mode for now
